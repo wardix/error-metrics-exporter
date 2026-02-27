@@ -46,6 +46,10 @@ app.post("/api/logs", async (c) => {
       const path = log.path || "UNKNOWN";
       const status = log.status ? String(log.status) : "UNKNOWN";
 
+      if (!status.startsWith("4") && !status.startsWith("5")) {
+        continue;
+      }
+
       const labelStr = `host="${host}",method="${method}",path="${path}",status="${status}"`;
 
       errorLogs.push({ ts, host, method, path, status, labelStr });
@@ -70,11 +74,9 @@ function buildMetricLines(
 ): string[] {
   const lines: string[] = [];
   for (const [labelStr, count] of Object.entries(mapCount)) {
-    lines.push(`${metricName}{${labelStr}} ${count}`);
-  }
-  // If there are no errors yet, output at least the metric with 0 total (without labels)
-  if (lines.length === 0 && metricName === "error_count_total") {
-    lines.push(`${metricName} 0`);
+    if (count > 0) {
+      lines.push(`${metricName}{${labelStr}} ${count}`);
+    }
   }
   return lines;
 }
@@ -88,47 +90,62 @@ app.get("/metrics", (c) => {
   const map15m: Record<string, number> = {};
   const map1h: Record<string, number> = {};
 
-  // Initialize all known labels with 0 so the metric doesn't disappear when there are no errors
-  for (const labelStr of Object.keys(totalErrorsMap)) {
-    map1m[labelStr] = 0;
-    map5m[labelStr] = 0;
-    map15m[labelStr] = 0;
-    map1h[labelStr] = 0;
-  }
-
   // Calculate periods
   for (const log of errorLogs) {
-    if (log.ts >= now - 1 * 60 * 1000) map1m[log.labelStr]!++;
-    if (log.ts >= now - 5 * 60 * 1000) map5m[log.labelStr]!++;
-    if (log.ts >= now - 15 * 60 * 1000) map15m[log.labelStr]!++;
-    if (log.ts >= now - 60 * 60 * 1000) map1h[log.labelStr]!++;
+    if (log.ts >= now - 1 * 60 * 1000)
+      map1m[log.labelStr] = (map1m[log.labelStr] || 0) + 1;
+    if (log.ts >= now - 5 * 60 * 1000)
+      map5m[log.labelStr] = (map5m[log.labelStr] || 0) + 1;
+    if (log.ts >= now - 15 * 60 * 1000)
+      map15m[log.labelStr] = (map15m[log.labelStr] || 0) + 1;
+    if (log.ts >= now - 60 * 60 * 1000)
+      map1h[log.labelStr] = (map1h[log.labelStr] || 0) + 1;
   }
 
-  // Construct Prometheus plaintext metrics format
-  const lines = [
-    "# HELP error_count_total The total number of errors received since start.",
-    "# TYPE error_count_total counter",
-    ...buildMetricLines("error_count_total", totalErrorsMap),
-    "",
-    "# HELP error_count_1m The number of errors received in the last 1 minute.",
-    "# TYPE error_count_1m gauge",
-    ...buildMetricLines("error_count_1m", map1m),
-    "",
-    "# HELP error_count_5m The number of errors received in the last 5 minutes.",
-    "# TYPE error_count_5m gauge",
-    ...buildMetricLines("error_count_5m", map5m),
-    "",
-    "# HELP error_count_15m The number of errors received in the last 15 minutes.",
-    "# TYPE error_count_15m gauge",
-    ...buildMetricLines("error_count_15m", map15m),
-    "",
-    "# HELP error_count_1h The number of errors received in the last 1 hour.",
-    "# TYPE error_count_1h gauge",
-    ...buildMetricLines("error_count_1h", map1h),
-    "",
-  ];
+  const metricsBlocks: string[] = [];
 
-  return c.text(lines.join("\n"));
+  const addBlock = (name: string, help: string, lines: string[]) => {
+    if (lines.length > 0) {
+      metricsBlocks.push(
+        [
+          `# HELP ${name} ${help}`,
+          `# TYPE ${name} ${name.endsWith("total") ? "counter" : "gauge"}`,
+          ...lines,
+        ].join("\n"),
+      );
+    }
+  };
+
+  addBlock(
+    "error_count_total",
+    "The total number of errors received since start.",
+    buildMetricLines("error_count_total", totalErrorsMap),
+  );
+  addBlock(
+    "error_count_1m",
+    "The number of errors received in the last 1 minute.",
+    buildMetricLines("error_count_1m", map1m),
+  );
+  addBlock(
+    "error_count_5m",
+    "The number of errors received in the last 5 minutes.",
+    buildMetricLines("error_count_5m", map5m),
+  );
+  addBlock(
+    "error_count_15m",
+    "The number of errors received in the last 15 minutes.",
+    buildMetricLines("error_count_15m", map15m),
+  );
+  addBlock(
+    "error_count_1h",
+    "The number of errors received in the last 1 hour.",
+    buildMetricLines("error_count_1h", map1h),
+  );
+
+  const output =
+    metricsBlocks.length > 0 ? metricsBlocks.join("\n\n") + "\n" : "";
+
+  return c.text(output);
 });
 
 const port = parseInt(process.env.PORT || "3000", 10);
