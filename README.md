@@ -66,7 +66,7 @@ http {
         '"timestamp":"$time_iso8601",'
         '"host":"$host",'
         '"method":"$request_method",'
-        '"path":"$uri",'
+        '"path":"$request_uri",'
         '"status":"$status",'
         '"message":"$request"'
     '}';
